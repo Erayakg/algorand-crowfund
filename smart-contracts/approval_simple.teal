@@ -1,0 +1,172 @@
+#pragma version 8
+txn ApplicationID
+int 0
+==
+bnz main_l18
+txn OnCompletion
+int OptIn
+==
+bnz main_l17
+txn OnCompletion
+int CloseOut
+==
+bnz main_l16
+txn OnCompletion
+int UpdateApplication
+==
+bnz main_l15
+txn OnCompletion
+int DeleteApplication
+==
+bnz main_l14
+txn OnCompletion
+int NoOp
+==
+bnz main_l7
+err
+main_l7:
+txna ApplicationArgs 0
+byte "create"
+==
+bnz main_l13
+txna ApplicationArgs 0
+byte "contribute"
+==
+bnz main_l12
+txna ApplicationArgs 0
+byte "withdraw"
+==
+bnz main_l11
+err
+main_l11:
+txn Sender
+byte "p_"
+txna ApplicationArgs 1
+btoi
+itob
+concat
+byte "_creator"
+concat
+app_global_get
+==
+assert
+itxn_begin
+int pay
+itxn_field TypeEnum
+txn Sender
+itxn_field Receiver
+byte "p_"
+txna ApplicationArgs 1
+btoi
+itob
+concat
+byte "_collected"
+concat
+app_global_get
+itxn_field Amount
+int 1000
+itxn_field Fee
+itxn_submit
+int 1
+return
+main_l12:
+global GroupSize
+int 2
+==
+assert
+gtxn 0 TypeEnum
+int pay
+==
+assert
+gtxn 0 Receiver
+global CurrentApplicationAddress
+==
+assert
+byte "p_"
+txna ApplicationArgs 1
+btoi
+itob
+concat
+byte "_collected"
+concat
+byte "p_"
+txna ApplicationArgs 1
+btoi
+itob
+concat
+byte "_collected"
+concat
+app_global_get
+gtxn 0 Amount
++
+app_global_put
+int 1
+return
+main_l13:
+txn NumAppArgs
+int 6
+==
+assert
+byte "p_"
+byte "project_count"
+app_global_get
+itob
+concat
+byte "_name"
+concat
+txna ApplicationArgs 1
+app_global_put
+byte "p_"
+byte "project_count"
+app_global_get
+itob
+concat
+byte "_target"
+concat
+txna ApplicationArgs 3
+btoi
+app_global_put
+byte "p_"
+byte "project_count"
+app_global_get
+itob
+concat
+byte "_creator"
+concat
+txn Sender
+app_global_put
+byte "p_"
+byte "project_count"
+app_global_get
+itob
+concat
+byte "_collected"
+concat
+int 0
+app_global_put
+byte "project_count"
+byte "project_count"
+app_global_get
+int 1
++
+app_global_put
+int 1
+return
+main_l14:
+int 0
+return
+main_l15:
+int 0
+return
+main_l16:
+int 1
+return
+main_l17:
+int 1
+return
+main_l18:
+byte "project_count"
+int 0
+app_global_put
+int 1
+return
