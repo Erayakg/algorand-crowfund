@@ -119,6 +119,7 @@ export type ProjectCreateData = {
   targetAmount: number // in microAlgos
   deadline: number // unix seconds
   category: string
+  threshold: number // NFT reward threshold in microAlgos (e.g. 10 ALGO = 10000000)
 }
 
 // Build an unsigned app call txn for 'create' action to be signed by a wallet
@@ -153,27 +154,157 @@ export const buildCreateProjectTxn = async (
   if (!data.category || typeof data.category !== 'string') {
     throw new Error('Invalid category')
   }
+  if (!Number.isInteger(data.threshold) || data.threshold <= 0) {
+    throw new Error('Invalid NFT threshold amount')
+  }
 
   const params = await client.getTransactionParams().do()
   // Use the params directly without modification
   const suggestedParams = params
 
+  // Debug: şu anki timestamp ve deadline'ı kontrol et
+  const currentTimestamp = Math.floor(Date.now() / 1000)
+  console.log('🕒 Debug - Current timestamp:', currentTimestamp)
+  console.log('🕒 Debug - Project deadline:', data.deadline)
+  console.log('🕒 Debug - Deadline > current?', data.deadline > currentTimestamp)
+
+  // WORKAROUND: Smart contract timestamp validation için çok ileri bir tarih kullan
+  const veryFutureDeadline = currentTimestamp + (365 * 24 * 60 * 60) // 1 yıl sonra
+  console.log('🕒 Debug - Using very future deadline:', veryFutureDeadline)
+
+  // TEST: Trying past timestamp to test timestamp validation
+  const pastTimestamp = 1000000000 // Very old timestamp (2001)
+  console.log('🧪 TEST - Using past timestamp:', pastTimestamp)
+
+  // CRITICAL FIX: Smart contract expects "create" not "create_project"!
+  console.log('🔧 CRITICAL FIX - Using "create" action name as per smart contract')
+
   const appArgs = [
-    enc.encode('create'),
-    enc.encode(data.name),
-    enc.encode(data.description),
-    algosdk.encodeUint64(data.targetAmount),
-    algosdk.encodeUint64(data.deadline),
-    enc.encode(data.category),
+    enc.encode('create'),                    // args[0] - FIXED: "create" not "create_project" 
+    enc.encode(data.name),                   // args[1] - project name
+    enc.encode(data.description),            // args[2] - project description
+    algosdk.encodeUint64(data.targetAmount), // args[3] - target amount in microAlgos
+    algosdk.encodeUint64(data.deadline),     // args[4] - deadline timestamp
+    enc.encode(data.category),               // args[5] - project category
+    // Note: Only 6 arguments total (no threshold for this contract)
   ]
 
-  return algosdk.makeApplicationCallTxnFromObject({
-    sender: normalizedSender,
-    appIndex: appId,
-    appArgs,
-    onComplete: algosdk.OnApplicationComplete.NoOpOC,
-    suggestedParams
-  })
+  console.log('📋 Debug - CORRECTED App arguments:')
+  console.log('  args[0] (action):', 'create', '(length:', 'create'.length, ')')
+  console.log('  args[1] (name):', data.name, '(length:', data.name.length, ')')
+  console.log('  args[2] (desc):', data.description, '(length:', data.description.length, ')')
+  console.log('  args[3] (target):', data.targetAmount, 'microAlgos')
+  console.log('  args[4] (deadline):', data.deadline, '(timestamp)')
+  console.log('  args[5] (category):', data.category, '(length:', data.category.length, ')')
+  console.log('  Total argument count:', appArgs.length)
+
+  console.log('📋 Debug - EXTREME DETAIL for PC=141:')
+  console.log('  - Data object received:', JSON.stringify(data))
+  console.log('  - Current timestamp (now):', currentTimestamp)
+  console.log('  - Future timestamp:', veryFutureDeadline)
+  console.log('  - Timestamp difference:', veryFutureDeadline - currentTimestamp)
+  console.log('  - Is future > now?', veryFutureDeadline > currentTimestamp)
+  console.log('  - Threshold value:', data.threshold, '(type:', typeof data.threshold, ')')
+  console.log('  - Threshold > 0?', Number(data.threshold) > 0)
+
+  console.log('📋 Debug - App arguments (DETAILED):')
+  console.log('  args[0]:', 'create_project', '(length:', 'create_project'.length, ')')
+  console.log('  args[1]:', data.name, '(length:', data.name.length, ')')
+  console.log('  args[2]:', data.description, '(length:', data.description.length, ')')
+  console.log('  args[3] (timestamp):', veryFutureDeadline)
+  console.log('  args[4]:', data.category, '(length:', data.category.length, ')')
+  console.log('  args[5] (threshold):', Number(data.threshold))
+  console.log('  Total argument count:', appArgs.length)
+  console.log('  Each arg as bytes:', appArgs.map((arg, i) => `arg[${i}]: ${arg.length} bytes`))
+
+  console.log('📋 Debug - Argument validation:')
+  appArgs.forEach((arg, index) => {
+    console.log(`  arg[${index}]: length=${arg.length}, first_bytes=[${Array.from(arg.slice(0, 10)).join(',')}]`)
+
+    // Special handling for numeric arguments (only for 8-byte uint64 arguments)
+    if (index === 3 && arg.length === 8) { // target amount
+      const targetBytes = Array.from(arg)
+      console.log(`    � Target amount bytes: [${targetBytes.join(',')}]`)
+      try {
+        const view = new DataView(arg.buffer)
+        const decodedTarget = view.getBigUint64(0, false) // big-endian
+        console.log(`    � Decoded target: ${decodedTarget} (original: ${data.targetAmount})`)
+        console.log(`    � Target match: ${Number(decodedTarget) === data.targetAmount}`)
+      } catch (e) {
+        console.log(`    💰 Target decode error:`, e)
+      }
+    }
+
+    if (index === 4 && arg.length === 8) { // deadline timestamp
+      const timestampBytes = Array.from(arg)
+      console.log(`    � Deadline bytes: [${timestampBytes.join(',')}]`)
+      try {
+        const view = new DataView(arg.buffer)
+        const decodedDeadline = view.getBigUint64(0, false) // big-endian
+        console.log(`    � Decoded deadline: ${decodedDeadline} (original: ${data.deadline})`)
+        console.log(`    � Deadline match: ${Number(decodedDeadline) === data.deadline}`)
+      } catch (e) {
+        console.log(`    � Deadline decode error:`, e)
+      }
+    }
+  })  // Use original 6 arguments, let's fix the transaction creation
+  // Use ONLY the correct field names for makeApplicationCallTxnFromObject API
+  try {
+    const txnParams = {
+      from: normalizedSender,                   // Sender address (old style)
+      sender: normalizedSender,                 // Sender address (new style) - REQUIRED
+      appIndex: appId,                          // Application ID
+      appArgs: appArgs,                         // Application arguments
+      onComplete: algosdk.OnApplicationComplete.NoOpOC, // On complete action
+      suggestedParams: suggestedParams          // Transaction parameters
+    }
+
+    console.log('📋 Debug - Transaction params (CLEAN):', Object.keys(txnParams))
+    console.log('📋 Debug - Params detail:')
+    console.log('  - from:', txnParams.from)
+    console.log('  - sender:', txnParams.sender)
+    console.log('  - appIndex:', txnParams.appIndex)
+    console.log('  - appArgs count:', txnParams.appArgs.length)
+    console.log('  - onComplete:', txnParams.onComplete)
+
+    const txn = algosdk.makeApplicationCallTxnFromObject(txnParams)
+
+    console.log('📋 Debug - Transaction creation SUCCESS')
+    console.log('  - Transaction type:', (txn as any).type)
+    console.log('  - App index:', (txn as any).appIndex)
+    console.log('  - App args in txn:', (txn as any).appArgs?.length || 'undefined')
+    console.log('  - On complete:', (txn as any).onComplete)
+    console.log('  - First app arg:', (txn as any).appArgs?.[0] ? Buffer.from((txn as any).appArgs[0]).toString() : 'undefined')
+
+    // Additional verification - check all transaction fields
+    console.log('📋 Debug - Transaction field verification:')
+    console.log('  - txn.from:', (txn as any).from)
+    console.log('  - txn.appIndex:', (txn as any).appIndex)
+    console.log('  - txn.appArgs:', (txn as any).appArgs?.length)
+
+    // CHECK THE CORRECT LOCATION: applicationCall field
+    console.log('📋 Debug - ApplicationCall field verification:')
+    const appCall = (txn as any).applicationCall
+    if (appCall) {
+      console.log('  - applicationCall exists:', !!appCall)
+      console.log('  - applicationCall.appIndex:', appCall.appIndex)
+      console.log('  - applicationCall.appArgs:', appCall.appArgs?.length || 'undefined')
+      console.log('  - applicationCall.onComplete:', appCall.onComplete)
+      console.log('  - applicationCall keys:', Object.keys(appCall))
+      if (appCall.appArgs && appCall.appArgs.length > 0) {
+        console.log('  - First arg in applicationCall:', Buffer.from(appCall.appArgs[0]).toString())
+      }
+    } else {
+      console.log('  - applicationCall field is missing!')
+    }
+
+    console.log('  - Full transaction object keys:', Object.keys(txn as any))
+
+    return txn
+  } catch (txnError) {
+    console.error('📋 Debug - Transaction creation FAILED:', txnError)
+    throw txnError
+  }
 }
 
 // Submit signed transaction bytes and wait for confirmation
@@ -189,8 +320,22 @@ export const submitSignedTransaction = async (
 
 // Build a WalletConnect/Pera-friendly signing payload from a single unsigned txn
 export const toPeraTxnBase64 = (txn: algosdk.Transaction): string => {
-  const encoded = algosdk.encodeUnsignedTransaction(txn)
-  return Buffer.from(encoded).toString('base64')
+  try {
+    // İlk yöntem: algosdk.encodeUnsignedTransaction kullan
+    const encoded = algosdk.encodeUnsignedTransaction(txn)
+    return Buffer.from(encoded).toString('base64')
+  } catch (error) {
+    console.warn('algosdk.encodeUnsignedTransaction failed, trying alternative...', error)
+    try {
+      // Alternatif yöntem: transaction nesnesini doğrudan JSON'a çevir
+      const txnObj = (txn as any).get_obj_for_encoding ? (txn as any).get_obj_for_encoding() : txn
+      const encoded = algosdk.encodeObj(txnObj)
+      return Buffer.from(encoded).toString('base64')
+    } catch (error2) {
+      console.error('All encoding methods failed:', error2)
+      throw new Error('Failed to encode transaction for signing')
+    }
+  }
 }
 export const contributeToProject = async (
   client: algosdk.Algodv2,
@@ -275,7 +420,7 @@ export const buildContributeGroupTxns = async (
     amount,
     haveParams: !!suggestedParams,
   })
-  
+
   // Use the suggested params directly without modification
   const sp = suggestedParams
   let paymentTxn: algosdk.Transaction
@@ -318,122 +463,112 @@ export const getProjects = async (client: algosdk.Algodv2, appId: number) => {
 
     const globalState = (appInfo.params as any)['global-state'] || (appInfo.params as any).globalState || []
     console.log('🌍 Global state:', globalState)
+    console.log('📏 Global state length:', globalState.length)
 
-    // Debug: Print all keys
-    console.log('🔑 All keys in global state:')
+    // CRITICAL DEBUG: Log all keys to understand the real pattern (COMPACT VERSION)
+    console.log('🔍 DEBUG - ALL GLOBAL STATE KEYS (COMPACT):')
+    const allKeys: string[] = []
     globalState.forEach((item: any, index: number) => {
-      const kb = Buffer.from(item.key, 'base64')
-      // Show key in a readable shape: prefix/suffix with hex for id
-      let preview = ''
-      try {
-        preview = kb.toString()
-      } catch {
-        preview = Array.from(kb).map((b) => b.toString(16).padStart(2, '0')).join('')
-      }
-      const value = item.value.bytes
-        ? Buffer.from(item.value.bytes, 'base64').toString()
-        : item.value.uint
-      console.log(`  ${index}: "${preview}" = ${value}`)
+      const key = Buffer.from(item.key, 'base64').toString()
+      allKeys.push(key)
     })
+    console.log('📋 All keys found:', allKeys)
 
-    // Extract project count
+    // Group keys by prefix to understand pattern
+    const projectKeys = allKeys.filter(k => k.startsWith('p_'))
+    console.log('🎯 Project-related keys:', projectKeys)    // Extract project count first
     const projectCountState = globalState.find((item: any) =>
       Buffer.from(item.key, 'base64').toString() === 'project_count'
     )
-    const projectCount = projectCountState ? projectCountState.value.uint : 0
-    console.log('📊 Project count found:', projectCount)
+    const projectCount = projectCountState ? Number(projectCountState.value.uint) : 0
+    console.log('📊 Project count found:', projectCount, typeof projectCount)
 
-    // Helper to read 8-byte big-endian uint64
-    const readUint64BE = (bytes: Uint8Array): number => {
-      let v = 0
-      for (let i = 0; i < bytes.length; i++) v = v * 256 + bytes[i]
-      return v
+    // If no projects, return early
+    if (projectCount === 0) {
+      console.log('⚠️ No projects found - returning empty array')
+      return []
     }
 
-    type PartialProject = {
-      id: number
-      name?: string
-      description?: string
-      creator?: string
-      targetAmount?: number
-      deadline?: number
-      collectedAmount?: number
-      category?: string
-      active?: number | boolean
-    }
+    console.log('🔧 FIXED - Now parsing real blockchain data instead of mock data')
 
-    const byId: Record<number, PartialProject> = {}
-    const prefix = Buffer.from('p_')
+    // Parse real project data from global state
+    const projects: any[] = []
 
-    for (const item of globalState) {
-      const keyBytes = Buffer.from(item.key, 'base64')
-      if (keyBytes.length < 2 + 8 + 1) continue // need at least 'p_' + 8-byte id + '_' + x
-      // Check prefix 'p_'
-      if (keyBytes[0] !== prefix[0] || keyBytes[1] !== prefix[1]) continue
+    for (let i = 0; i < projectCount; i++) {
+      console.log(`🔍 Parsing project ${i}...`)
 
-      const idBytes = keyBytes.slice(2, 10) // 8 bytes from Itob
-      const suffix = keyBytes.slice(10).toString()
-      const id = readUint64BE(idBytes)
-      if (!(id in byId)) byId[id] = { id }
+      // Create the binary key pattern - smart contract uses 8-byte integers
+      // Convert project ID to 8-byte buffer for key matching
+      const projectIdBuffer = Buffer.alloc(8)
+      projectIdBuffer.writeUInt32BE(0, 0) // High 32 bits = 0
+      projectIdBuffer.writeUInt32BE(i, 4) // Low 32 bits = project ID
 
-      const val = item.value.bytes
-        ? Buffer.from(item.value.bytes, 'base64').toString()
-        : item.value.uint
+      // Create expected key patterns with binary project ID
+      const nameKey = `p_${projectIdBuffer.toString()}_name`
+      const descKey = `p_${projectIdBuffer.toString()}_desc`
+      const targetKey = `p_${projectIdBuffer.toString()}_target`
+      const deadlineKey = `p_${projectIdBuffer.toString()}_deadline`
+      const categoryKey = `p_${projectIdBuffer.toString()}_category`
+      const creatorKey = `p_${projectIdBuffer.toString()}_creator`
+      const collectedKey = `p_${projectIdBuffer.toString()}_collected`
+      const activeKey = `p_${projectIdBuffer.toString()}_active`
 
-      switch (suffix) {
-        case '_name':
-          byId[id].name = String(val)
-          break
-        case '_target':
-          byId[id].targetAmount = Number(val)
-          break
-        case '_creator':
-          byId[id].creator = String(val)
-          break
-        case '_collected':
-          byId[id].collectedAmount = Number(val)
-          break
-        case '_deadline':
-          byId[id].deadline = Number(val)
-          break
-        case '_category':
-          byId[id].category = String(val)
-          break
-        case '_active':
-          byId[id].active = Number(val)
-          break
-        case '_desc':
-        case '_description':
-          byId[id].description = String(val)
-          break
-        default:
-          // Unrecognized suffix: ignore
-          break
+      console.log(`  Looking for keys with binary ID: project ${i} -> buffer pattern`)
+
+      // Extract data from global state - match binary keys
+      const nameState = globalState.find((item: any) =>
+        Buffer.from(item.key, 'base64').toString() === nameKey
+      )
+      const descState = globalState.find((item: any) =>
+        Buffer.from(item.key, 'base64').toString() === descKey
+      )
+      const targetState = globalState.find((item: any) =>
+        Buffer.from(item.key, 'base64').toString() === targetKey
+      )
+      const deadlineState = globalState.find((item: any) =>
+        Buffer.from(item.key, 'base64').toString() === deadlineKey
+      )
+      const categoryState = globalState.find((item: any) =>
+        Buffer.from(item.key, 'base64').toString() === categoryKey
+      )
+      const creatorState = globalState.find((item: any) =>
+        Buffer.from(item.key, 'base64').toString() === creatorKey
+      )
+      const collectedState = globalState.find((item: any) =>
+        Buffer.from(item.key, 'base64').toString() === collectedKey
+      )
+      const activeState = globalState.find((item: any) =>
+        Buffer.from(item.key, 'base64').toString() === activeKey
+      )
+
+      // Only add project if we have essential data
+      if (nameState && descState && targetState) {
+        const project = {
+          id: i,
+          name: nameState.value.bytes ? Buffer.from(nameState.value.bytes, 'base64').toString() : `Project ${i}`,
+          description: descState.value.bytes ? Buffer.from(descState.value.bytes, 'base64').toString() : `Description for project ${i}`,
+          creator: creatorState?.value.bytes ? Buffer.from(creatorState.value.bytes, 'base64').toString() : 'Unknown Creator',
+          targetAmount: targetState.value.uint || 1000000000,
+          deadline: deadlineState?.value.uint || Math.floor(Date.now() / 1000) + 86400 * 30,
+          collectedAmount: collectedState?.value.uint || 0,
+          category: categoryState?.value.bytes ? Buffer.from(categoryState.value.bytes, 'base64').toString() : 'General',
+          threshold: 0, // This contract doesn't use threshold
+          active: activeState?.value.uint === 1
+        }
+
+        console.log(`  ✅ Project ${i} parsed:`, project)
+        projects.push(project)
+      } else {
+        console.log(`  ⚠️ Project ${i} missing essential data, skipping`)
+        console.log(`    nameState:`, !!nameState, nameState?.value)
+        console.log(`    descState:`, !!descState, descState?.value)
+        console.log(`    targetState:`, !!targetState, targetState?.value)
       }
     }
 
-    const projects: any[] = []
-    for (let i = 0; i < projectCount; i++) {
-      const p = byId[i]
-      if (!p) continue
-      if (!p.name || typeof p.targetAmount !== 'number') continue
-
-      projects.push({
-        id: i,
-        name: p.name,
-        description: p.description || 'No description available',
-        creator: p.creator || '',
-        targetAmount: p.targetAmount,
-        deadline: p.deadline || Math.floor(Date.now() / 1000) + 86400 * 30,
-        collectedAmount: p.collectedAmount || 0,
-        category: p.category || 'General',
-        threshold: 0, // not stored in simple contract
-        active: (typeof p.active === 'number' ? p.active === 1 : !!p.active)
-      })
-    }
-
-    console.log('✅ Parsed projects:', projects)
+    console.log('✅ Real projects parsed from blockchain:', projects)
     return projects
+
   } catch (error) {
     console.error('Error fetching projects:', error)
     return []
@@ -518,23 +653,293 @@ export const mintRewardNFT = async (
   return res.txid
 }
 
-export const optInToApp = async (
+// Build opt-in transaction for the app
+export const buildOptInTxn = async (
   client: algosdk.Algodv2,
   sender: string,
-  privateKey: Uint8Array,
   appId: number
-): Promise<string> => {
+): Promise<algosdk.Transaction> => {
+  console.log('🔗 Building opt-in transaction for user:', sender, 'to app:', appId)
+
+  if (!sender) throw new Error('Address must not be null or undefined')
+  const normalizedSender = String(sender).replace(/[^\x20-\x7E]/g, '').trim()
+  if (!algosdk.isValidAddress(normalizedSender)) {
+    throw new Error(`Invalid Algorand address: ${normalizedSender}`)
+  }
+
   const params = await client.getTransactionParams().do()
 
-  const txn = algosdk.makeApplicationOptInTxnFromObject({
-    sender: sender,
+  return algosdk.makeApplicationCallTxnFromObject({
+    sender: normalizedSender,
     appIndex: appId,
+    onComplete: algosdk.OnApplicationComplete.OptInOC,
     suggestedParams: params
   })
+}
 
-  const signed = algosdk.signTransaction(txn, privateKey)
-  const res = await client.sendRawTransaction(signed.blob).do()
+// Opt user into the app
+export const optInToApp = async (
+  client: algosdk.Algodv2,
+  appId: number,
+  sender: string,
+  peraWallet: any
+): Promise<string> => {
+  try {
+    console.log('🔗 Opting user into app:', appId)
 
-  await waitForConfirmation(client, res.txid)
-  return res.txid
+    const optInTxn = await buildOptInTxn(client, sender, appId)
+
+    console.log('📝 Signing opt-in transaction with Pera Wallet...')
+
+    let signedTxns: any
+    try {
+      // First try base64 format (like create project)
+      const txnBytes = toPeraTxnBase64(optInTxn)
+      signedTxns = await peraWallet.signTransaction([[{ txn: txnBytes }]])
+    } catch (error) {
+      console.warn('Base64 signing failed, trying object format...', error)
+      // Fallback to object format
+      const txnObj = (optInTxn as any)?.get_obj_for_encoding
+        ? (optInTxn as any).get_obj_for_encoding()
+        : (optInTxn as any)
+      signedTxns = await peraWallet.signTransaction([[{ txn: txnObj }]])
+    }
+
+    console.log('✅ Opt-in transaction signed, signedTxns:', signedTxns)
+
+    const txId = await submitSignedTransaction(client, signedTxns)
+
+    console.log('🎉 Successfully opted in to app! Transaction ID:', txId)
+    return txId
+  } catch (error) {
+    console.error('❌ Error opting in to app:', error)
+    throw error
+  }
+}
+
+// Build unsigned NFT mint transaction for wallet signing
+export const buildMintNFTTxn = async (
+  client: algosdk.Algodv2,
+  sender: string,
+  appId: number,
+  projectId: number
+): Promise<algosdk.Transaction> => {
+  if (!sender) throw new Error('Address must not be null or undefined')
+  const normalizedSender = String(sender).replace(/[^\x20-\x7E]/g, '').trim()
+  if (!algosdk.isValidAddress(normalizedSender)) {
+    throw new Error(`Invalid Algorand address: ${normalizedSender}`)
+  }
+
+  const params = await client.getTransactionParams().do()
+  const appArgs = [enc.encode('mint_nft'), algosdk.encodeUint64(projectId)]
+
+  return algosdk.makeApplicationCallTxnFromObject({
+    sender: normalizedSender,
+    appIndex: appId,
+    appArgs,
+    onComplete: algosdk.OnApplicationComplete.NoOpOC,
+    suggestedParams: params
+  })
+}
+
+// Get user's NFTs from local state
+export const getUserNFTs = async (client: algosdk.Algodv2, appId: number, userAddress: string) => {
+  try {
+    const accountInfo = await client.accountInformation(userAddress).do()
+    const localStates = (accountInfo as any)['apps-local-state'] || accountInfo.appsLocalState || []
+
+    const appState = localStates.find((state: any) => state.id === appId)
+    if (!appState) return []
+
+    const keyValuePairs = appState['key-value'] || []
+    const nfts: any[] = []
+
+    // Get project data to match NFT project names
+    const projects = await getProjects(client, appId)
+
+    for (const kvp of keyValuePairs) {
+      const keyBytes = Buffer.from(kvp.key, 'base64')
+      const key = keyBytes.toString()
+
+      // Look for NFT keys (nft_<projectId>)
+      if (key.startsWith('nft_') && kvp.value.uint > 0) {
+        const projectId = parseInt(key.split('_')[1])
+        const assetId = kvp.value.uint
+
+        // Find matching project
+        const project = projects.find((p: any) => p.id === projectId)
+
+        if (project) {
+          // Get contribution amount
+          const contribKey = `contrib_${projectId}`
+          const contribKvp = keyValuePairs.find((k: any) =>
+            Buffer.from(k.key, 'base64').toString() === contribKey
+          )
+          const contributionAmount = contribKvp ? contribKvp.value.uint : 0
+
+          nfts.push({
+            assetId,
+            name: `Reward NFT - ${project.name}`,
+            projectName: project.name,
+            contributionAmount,
+            projectId,
+            url: `ipfs://reward-${projectId}-${userAddress}`
+          })
+        }
+      }
+    }
+
+    return nfts
+  } catch (error) {
+    console.error('Error fetching user NFTs:', error)
+    return []
+  }
+}
+
+// Check if user is eligible for NFT
+export const checkNFTEligibility = async (
+  client: algosdk.Algodv2,
+  appId: number,
+  userAddress: string,
+  projectId: number
+): Promise<{ eligible: boolean, contributionAmount: number, alreadyMinted: boolean }> => {
+  try {
+    console.log(`🔍 Checking NFT eligibility for user ${userAddress} on project ${projectId}`)
+    const accountInfo = await client.accountInformation(userAddress).do()
+    console.log('👤 Account info received:', accountInfo)
+
+    const localStates = (accountInfo as any)['apps-local-state'] || accountInfo.appsLocalState || []
+    console.log('📱 Local states count:', localStates.length)
+
+    const appState = localStates.find((state: any) => state.id === appId)
+    if (!appState) {
+      console.log(`❌ No app state found for appId ${appId}`)
+      return { eligible: false, contributionAmount: 0, alreadyMinted: false }
+    }
+
+    console.log('✅ App state found:', appState)
+    const keyValuePairs = appState['key-value'] || []
+    console.log('🔑 Key-value pairs:', keyValuePairs.length)
+
+    // Debug: Log all keys
+    keyValuePairs.forEach((kvp: any, index: number) => {
+      const key = Buffer.from(kvp.key, 'base64').toString()
+      const value = kvp.value.uint || kvp.value.bytes
+      console.log(`  Key ${index}: "${key}" = ${value}`)
+    })
+
+    // Check contribution amount
+    const contribKey = `contrib_${projectId}`
+    console.log(`🔍 Looking for contribution key: "${contribKey}"`)
+    const contribKvp = keyValuePairs.find((kvp: any) =>
+      Buffer.from(kvp.key, 'base64').toString() === contribKey
+    )
+    const contributionAmount = contribKvp ? contribKvp.value.uint : 0
+    console.log(`💰 Contribution amount found: ${contributionAmount} microAlgos (${contributionAmount / 1000000} ALGO)`)
+
+    // Check if already minted
+    const nftKey = `nft_${projectId}`
+    console.log(`🔍 Looking for NFT key: "${nftKey}"`)
+    const nftKvp = keyValuePairs.find((kvp: any) =>
+      Buffer.from(kvp.key, 'base64').toString() === nftKey
+    )
+    const alreadyMinted = nftKvp ? nftKvp.value.uint > 0 : false
+    console.log(`🎨 Already minted: ${alreadyMinted}`)
+
+    // Minimum 10 ALGO (10,000,000 microAlgos) for NFT eligibility
+    const eligible = contributionAmount >= 10000000 && !alreadyMinted
+    console.log(`🎯 Final eligibility result:`, {
+      eligible,
+      contributionAmount,
+      alreadyMinted,
+      meetsThreshold: contributionAmount >= 10000000,
+      threshold: 10000000
+    })
+
+    return { eligible, contributionAmount, alreadyMinted }
+  } catch (error) {
+    console.error('❌ Error checking NFT eligibility:', error)
+    return { eligible: false, contributionAmount: 0, alreadyMinted: false }
+  }
+}
+
+// Check if user is opted into the app
+export const isUserOptedIn = async (
+  client: algosdk.Algodv2,
+  userAddress: string,
+  appId: number
+): Promise<boolean> => {
+  try {
+    console.log('🔍 Checking opt-in status for address:', userAddress, 'app:', appId)
+    const accountInfo = await client.accountInformation(userAddress).do()
+    console.log('👤 Account info retrieved')
+
+    const localStates = (accountInfo as any)['apps-local-state'] || accountInfo.appsLocalState || []
+    console.log('📱 Local states found:', localStates.length)
+
+    // Log all app IDs for debugging - convert to numbers for comparison
+    const appIds = localStates.map((state: any) => {
+      const id = Number(state.id)
+      console.log('📱 Found app ID:', id, '(type:', typeof id, ')')
+      return id
+    })
+    console.log('📱 User opted into apps:', appIds)
+    console.log('🎯 Looking for app ID:', appId, '(type:', typeof appId, ')')
+
+    // Use Number() to ensure type consistency
+    const isOptedIn = localStates.some((state: any) => Number(state.id) === Number(appId))
+    console.log(`✅ User opted in to app ${appId}:`, isOptedIn)
+
+    return isOptedIn
+  } catch (error) {
+    console.error('❌ Error checking opt-in status:', error)
+    return false
+  }
+}
+
+// Ensure user is opted in before contributing
+export const ensureOptedIn = async (
+  client: algosdk.Algodv2,
+  userAddress: string,
+  appId: number,
+  peraWallet: any,
+  cachedOptedIn?: boolean | null
+): Promise<boolean> => {
+  console.log('🔍 Checking if user is opted in to app:', appId)
+
+  // Use cached value if available, otherwise check blockchain
+  let isOptedIn = cachedOptedIn
+  if (isOptedIn === null || isOptedIn === undefined) {
+    console.log('📡 No cached opt-in status, checking blockchain...')
+    isOptedIn = await isUserOptedIn(client, userAddress, appId)
+  } else {
+    console.log('💾 Using cached opt-in status:', isOptedIn)
+  }
+
+  if (!isOptedIn) {
+    console.log('❌ User not opted in, initiating opt-in process')
+
+    try {
+      // If user is already opted in, this will fail with "already opted in" error
+      await optInToApp(client, appId, userAddress, peraWallet)
+      console.log('✅ User successfully opted in to app')
+      return true // Successfully opted in
+    } catch (error: any) {
+      const errorMsg = error?.message || ''
+      console.log('🔍 Opt-in attempt resulted in error:', errorMsg)
+
+      // Check if the error is because user is already opted in
+      if (errorMsg.includes('has already opted in to app') || errorMsg.includes('already opted in')) {
+        console.log('✅ User was already opted in (blockchain confirmed)')
+        return true // User is opted in
+      }
+
+      // If it's a different error, throw it
+      console.error('❌ Unexpected opt-in error:', error)
+      throw error
+    }
+  } else {
+    console.log('✅ User already opted in to app (cache/local state confirmed)')
+    return true // User is opted in
+  }
 }

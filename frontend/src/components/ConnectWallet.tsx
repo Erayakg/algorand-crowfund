@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { PeraWalletConnect } from '@perawallet/connect'
+import { getAlgodClient, APP_ID, isUserOptedIn, ensureOptedIn } from '@/utils/algorand'
 
 interface ConnectWalletProps {
   connected: boolean
@@ -23,8 +24,11 @@ export const ConnectWallet = ({ connected, address, onConnect, onDisconnect, onC
       try {
         const accounts = await peraWallet.reconnectSession()
         if (accounts.length > 0 && !connected) {
-          onConnect(accounts[0])
+          const address = accounts[0]
+          onConnect(address)
           if (onConnectPera) onConnectPera(peraWallet)
+
+          // Auto opt-in removed - will be done when user takes action (contribute/create)
         }
       } catch (error) {
         console.error('Error during reconnectSession:', error)
@@ -34,6 +38,27 @@ export const ConnectWallet = ({ connected, address, onConnect, onDisconnect, onC
     reconnect()
   }, [peraWallet, connected, onConnect, onConnectPera])
 
+  const handleAutoOptIn = async (address: string) => {
+    try {
+      console.log('🔍 Checking auto opt-in for address:', address)
+      const client = getAlgodClient()
+
+      const isOptedIn = await isUserOptedIn(client, address, APP_ID)
+      console.log('📱 User opted in status:', isOptedIn)
+
+      if (!isOptedIn) {
+        console.log('🔗 Starting automatic opt-in process...')
+        await ensureOptedIn(client, address, APP_ID, peraWallet)
+        console.log('✅ Auto opt-in completed successfully')
+      } else {
+        console.log('✅ User already opted in, skipping')
+      }
+    } catch (error) {
+      console.error('⚠️ Auto opt-in failed (this is optional):', error)
+      // Don't throw error - opt-in failure shouldn't block wallet connection
+    }
+  }
+
   const connectWallet = async () => {
     try {
       setConnecting(true)
@@ -42,8 +67,11 @@ export const ConnectWallet = ({ connected, address, onConnect, onDisconnect, onC
       const accounts = existing.length > 0 ? existing : await peraWallet.connect()
 
       if (accounts.length > 0) {
-        onConnect(accounts[0])
+        const address = accounts[0]
+        onConnect(address)
         if (onConnectPera) onConnectPera(peraWallet)
+
+        // Auto opt-in removed - will be done when user takes action (contribute/create)
       }
     } catch (error) {
       console.error('Failed to connect wallet:', error)
