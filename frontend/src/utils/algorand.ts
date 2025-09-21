@@ -1,5 +1,8 @@
 import algosdk from 'algosdk'
 
+// Browser-safe string -> Uint8Array encoder
+const enc = new TextEncoder()
+
 // Algorand Testnet configuration
 export const ALGOD_TOKEN = ''
 export const ALGOD_SERVER = 'https://testnet-api.algonode.cloud'
@@ -50,16 +53,15 @@ export const getProgressPercentage = (collected: number, target: number): number
   return Math.min((collected / target) * 100, 100)
 }
 
-export const waitForConfirmation = async (client: algosdk.Algodv2, txid: string): Promise<algosdk.PendingTransactionInfo> => {
+export const waitForConfirmation = async (client: algosdk.Algodv2, txid: string): Promise<any> => {
   const status = await client.status().do()
-  let lastRound = status['last-round']
+  let lastRound = (status as any).lastRound || (status as any)['last-round']
 
   while (true) {
     try {
-      const pendingInfo = await client.pendingTransactionInformation(txid).do()
-      if (pendingInfo['confirmed-round'] && pendingInfo['confirmed-round'] > 0) {
-        return pendingInfo
-      }
+      const pendingInfo: any = await client.pendingTransactionInformation(txid).do()
+      const confirmed = pendingInfo.confirmedRound || pendingInfo['confirmed-round']
+      if (confirmed && confirmed > 0) return pendingInfo
       lastRound++
       await client.statusAfterBlock(lastRound).do()
     } catch (e) {
@@ -86,19 +88,20 @@ export const createProject = async (
   const params = await client.getTransactionParams().do()
 
   const appArgs = [
-    new Uint8Array(Buffer.from('create')), // Fixed: 'create' instead of 'create_project'
-    new Uint8Array(Buffer.from(projectData.name)),
-    new Uint8Array(Buffer.from(projectData.description)),
+    enc.encode('create'), // Fixed: 'create' instead of 'create_project'
+    enc.encode(projectData.name),
+    enc.encode(projectData.description),
     algosdk.encodeUint64(projectData.targetAmount),
     algosdk.encodeUint64(projectData.deadline),
-    new Uint8Array(Buffer.from(projectData.category))
+    enc.encode(projectData.category)
     // Removed threshold - backend doesn't support it
   ]
 
-  const txn = algosdk.makeApplicationNoOpTxnFromObject({
-    from: sender,
+  const txn = algosdk.makeApplicationCallTxnFromObject({
+    sender: sender,
     appIndex: appId,
     appArgs,
+    onComplete: algosdk.OnApplicationComplete.NoOpOC,
     suggestedParams: params
   })
 
@@ -125,17 +128,52 @@ export const buildCreateProjectTxn = async (
   appId: number,
   data: ProjectCreateData
 ): Promise<algosdk.Transaction> => {
+  if (!sender) {
+    throw new Error('Address must not be null or undefined')
+  }
+  const normalizedSender = String(sender).replace(/[^\x20-\x7E]/g, '').trim()
+  console.log('buildCreateProjectTxn sender:', normalizedSender, 'len:', normalizedSender.length)
+  if (!algosdk.isValidAddress(normalizedSender)) {
+    throw new Error(`Invalid Algorand address: ${normalizedSender}`)
+  }
+
+  // Validate project data fields
+  if (!data.name || typeof data.name !== 'string') {
+    throw new Error('Invalid project name')
+  }
+  if (!data.description || typeof data.description !== 'string') {
+    throw new Error('Invalid project description')
+  }
+  if (!Number.isInteger(data.targetAmount) || data.targetAmount <= 0) {
+    throw new Error('Invalid target amount')
+  }
+  if (!Number.isInteger(data.deadline) || data.deadline <= Math.floor(Date.now() / 1000)) {
+    throw new Error('Invalid deadline')
+  }
+  if (!data.category || typeof data.category !== 'string') {
+    throw new Error('Invalid category')
+  }
+
   const params = await client.getTransactionParams().do()
+  // Use the params directly without modification
+  const suggestedParams = params
+
   const appArgs = [
-    new Uint8Array(Buffer.from('create')),
-    new Uint8Array(Buffer.from(data.name)),
-    new Uint8Array(Buffer.from(data.description)),
+    enc.encode('create'),
+    enc.encode(data.name),
+    enc.encode(data.description),
     algosdk.encodeUint64(data.targetAmount),
     algosdk.encodeUint64(data.deadline),
-    new Uint8Array(Buffer.from(data.category))
+    enc.encode(data.category),
   ]
 
-  return algosdk.makeApplicationNoOpTxn(sender, params, appId, appArgs)
+  return algosdk.makeApplicationCallTxnFromObject({
+    sender: normalizedSender,
+    appIndex: appId,
+    appArgs,
+    onComplete: algosdk.OnApplicationComplete.NoOpOC,
+    suggestedParams
+  })
 }
 
 // Submit signed transaction bytes and wait for confirmation
@@ -144,11 +182,16 @@ export const submitSignedTransaction = async (
   signed: Uint8Array | Uint8Array[]
 ): Promise<string> => {
   const bytesArray = Array.isArray(signed) ? signed : [signed]
-  const txId = await client.sendRawTransaction(bytesArray).do()
-  await waitForConfirmation(client, txId.txId)
-  return txId.txId
+  const res = await client.sendRawTransaction(bytesArray).do()
+  await waitForConfirmation(client, res.txid)
+  return res.txid
 }
 
+// Build a WalletConnect/Pera-friendly signing payload from a single unsigned txn
+export const toPeraTxnBase64 = (txn: algosdk.Transaction): string => {
+  const encoded = algosdk.encodeUnsignedTransaction(txn)
+  return Buffer.from(encoded).toString('base64')
+}
 export const contributeToProject = async (
   client: algosdk.Algodv2,
   sender: string,
@@ -159,24 +202,32 @@ export const contributeToProject = async (
 ): Promise<string> => {
   const params = await client.getTransactionParams().do()
 
-  // Get app address
-  const appInfo = await client.getApplicationByID(appId).do()
-  const appAddress = appInfo['params']['creator']
+  // Get application escrow address
+  const appAddress = algosdk.getApplicationAddress(appId)
+  const appAddrStr = (appAddress as any).toString ? (appAddress as any).toString() : String(appAddress)
+  console.log('buildContributeGroupTxns appAddress:', appAddrStr)
+  if (!algosdk.isValidAddress(appAddrStr)) {
+    throw new Error(`Invalid application address derived from appId ${appId}: ${appAddrStr}`)
+  }
+
+  // Use the suggested params directly
+  const sp = params
 
   // Create payment transaction
   const paymentTxn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
-    from: sender,
-    to: appAddress,
+    sender: sender,
+    receiver: appAddrStr,
     amount,
-    suggestedParams: params
+    suggestedParams: sp
   })
 
   // Create app call transaction
-  const appTxn = algosdk.makeApplicationNoOpTxnFromObject({
-    from: sender,
+  const appTxn = algosdk.makeApplicationCallTxnFromObject({
+    sender: sender,
     appIndex: appId,
-    appArgs: [new Uint8Array(Buffer.from('contribute')), algosdk.encodeUint64(projectId)],
-    suggestedParams: params
+    appArgs: [enc.encode('contribute'), algosdk.encodeUint64(projectId)],
+    onComplete: algosdk.OnApplicationComplete.NoOpOC,
+    suggestedParams: sp
   })
 
   // Group transactions
@@ -194,24 +245,95 @@ export const contributeToProject = async (
   return res.txid
 }
 
+// Build unsigned group (payment + app call) for 'contribute' to be signed by a wallet
+export const buildContributeGroupTxns = async (
+  client: algosdk.Algodv2,
+  sender: string,
+  appId: number,
+  projectId: number,
+  amount: number
+): Promise<algosdk.Transaction[]> => {
+  if (!sender) throw new Error('Address must not be null or undefined')
+  const normalizedSender = String(sender).replace(/[^\x20-\x7E]/g, '').trim()
+  console.log('buildContributeGroupTxns sender:', normalizedSender, 'len:', normalizedSender.length)
+  if (!algosdk.isValidAddress(normalizedSender)) {
+    throw new Error(`Invalid Algorand address: ${normalizedSender}`)
+  }
+  const params = await client.getTransactionParams().do()
+  const suggestedParams = params
+
+  const appAddress = algosdk.getApplicationAddress(appId)
+  const appAddrStr = (appAddress as any).toString ? (appAddress as any).toString() : String(appAddress)
+  console.log('buildContributeGroupTxns appAddress:', appAddrStr)
+  if (!algosdk.isValidAddress(appAddrStr)) {
+    throw new Error(`Invalid application address derived from appId ${appId}: ${appAddrStr}`)
+  }
+
+  console.log('buildContributeGroupTxns payment fields:', {
+    from: normalizedSender,
+    to: appAddrStr,
+    amount,
+    haveParams: !!suggestedParams,
+  })
+  
+  // Use the suggested params directly without modification
+  const sp = suggestedParams
+  let paymentTxn: algosdk.Transaction
+  try {
+    paymentTxn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+      sender: normalizedSender,
+      receiver: appAddrStr,
+      amount,
+      suggestedParams: sp
+    })
+  } catch (e) {
+    console.error('Payment txn build failed with sp:', sp, e)
+    throw e
+  }
+
+  let appTxn: algosdk.Transaction
+  try {
+    appTxn = algosdk.makeApplicationCallTxnFromObject({
+      sender: normalizedSender,
+      appIndex: appId,
+      appArgs: [enc.encode('contribute'), algosdk.encodeUint64(projectId)],
+      onComplete: algosdk.OnApplicationComplete.NoOpOC,
+      suggestedParams: sp
+    })
+  } catch (e) {
+    console.error('AppCall txn build failed with sp:', sp, e)
+    throw e
+  }
+
+  const [p, a] = algosdk.assignGroupID([paymentTxn, appTxn])
+  return [p, a]
+}
+
 // Get projects from blockchain
 export const getProjects = async (client: algosdk.Algodv2, appId: number) => {
   try {
     console.log('🔍 Getting app info for ID:', appId)
-  const appInfo = await client.getApplicationByID(appId).do()
-  console.log('📱 App info received:', appInfo)
+    const appInfo = await client.getApplicationByID(appId).do()
+    console.log('📱 App info received:', appInfo)
 
-  const globalState = (appInfo.params as any)['global-state'] || (appInfo.params as any).globalState || []
+    const globalState = (appInfo.params as any)['global-state'] || (appInfo.params as any).globalState || []
     console.log('🌍 Global state:', globalState)
 
     // Debug: Print all keys
     console.log('🔑 All keys in global state:')
     globalState.forEach((item: any, index: number) => {
-      const decodedKey = Buffer.from(item.key, 'base64').toString()
+      const kb = Buffer.from(item.key, 'base64')
+      // Show key in a readable shape: prefix/suffix with hex for id
+      let preview = ''
+      try {
+        preview = kb.toString()
+      } catch {
+        preview = Array.from(kb).map((b) => b.toString(16).padStart(2, '0')).join('')
+      }
       const value = item.value.bytes
         ? Buffer.from(item.value.bytes, 'base64').toString()
         : item.value.uint
-      console.log(`  ${index}: "${decodedKey}" = ${value}`)
+      console.log(`  ${index}: "${preview}" = ${value}`)
     })
 
     // Extract project count
@@ -221,61 +343,96 @@ export const getProjects = async (client: algosdk.Algodv2, appId: number) => {
     const projectCount = projectCountState ? projectCountState.value.uint : 0
     console.log('📊 Project count found:', projectCount)
 
-    const projects = []
+    // Helper to read 8-byte big-endian uint64
+    const readUint64BE = (bytes: Uint8Array): number => {
+      let v = 0
+      for (let i = 0; i < bytes.length; i++) v = v * 256 + bytes[i]
+      return v
+    }
 
-    // Get each project's data
-    for (let i = 0; i < projectCount; i++) {
-      console.log(`🔍 Processing project ${i}`)
+    type PartialProject = {
+      id: number
+      name?: string
+      description?: string
+      creator?: string
+      targetAmount?: number
+      deadline?: number
+      collectedAmount?: number
+      category?: string
+      active?: number | boolean
+    }
 
-      const getProjectValue = (suffix: string) => {
-        // Exact key patterns from terminal output
-        const possibleKeys = [
-          `p__${suffix}`,            // Actual format: p__name, p__target, p__collected, p__creator
-        ]
+    const byId: Record<number, PartialProject> = {}
+    const prefix = Buffer.from('p_')
 
-        for (const keyPattern of possibleKeys) {
-          const state = globalState.find((item: any) =>
-            Buffer.from(item.key, 'base64').toString() === keyPattern
-          )
-          if (state) {
-            console.log(`✅ Found key: ${keyPattern} = ${state.value.bytes ? Buffer.from(state.value.bytes, 'base64').toString() : state.value.uint}`)
-            return state.value.bytes ? Buffer.from(state.value.bytes, 'base64').toString() : state.value.uint
-          }
-        }
-        console.log(`❌ Key not found for suffix: ${suffix}, tried: ${possibleKeys.join(', ')}`)
-        return null
-      }
+    for (const item of globalState) {
+      const keyBytes = Buffer.from(item.key, 'base64')
+      if (keyBytes.length < 2 + 8 + 1) continue // need at least 'p_' + 8-byte id + '_' + x
+      // Check prefix 'p_'
+      if (keyBytes[0] !== prefix[0] || keyBytes[1] !== prefix[1]) continue
 
-      const name = getProjectValue('name')
-      const description = getProjectValue('desc') || getProjectValue('description') || 'No description available'
-      const creator = getProjectValue('creator')
-      const target = getProjectValue('target')
-      const deadline = getProjectValue('deadline') || Math.floor(Date.now() / 1000) + 86400 * 30 // Default 30 days
-      const collected = getProjectValue('collected') || 0
-      const category = getProjectValue('category') || 'General'
-      const active = getProjectValue('active') !== null ? getProjectValue('active') : 1 // Default active
+      const idBytes = keyBytes.slice(2, 10) // 8 bytes from Itob
+      const suffix = keyBytes.slice(10).toString()
+      const id = readUint64BE(idBytes)
+      if (!(id in byId)) byId[id] = { id }
 
-      console.log(`📝 Project ${i} extracted data:`, {
-        name, description, creator, target, deadline, collected, category, active
-      })
+      const val = item.value.bytes
+        ? Buffer.from(item.value.bytes, 'base64').toString()
+        : item.value.uint
 
-      // Create project even if some fields are missing
-      if (name && target) {
-        projects.push({
-          id: i,
-          name,
-          description,
-          creator,
-          targetAmount: target,
-          deadline,
-          collectedAmount: collected,
-          category,
-          threshold: 0, // Not stored in simple contract
-          active: active === 1
-        })
+      switch (suffix) {
+        case '_name':
+          byId[id].name = String(val)
+          break
+        case '_target':
+          byId[id].targetAmount = Number(val)
+          break
+        case '_creator':
+          byId[id].creator = String(val)
+          break
+        case '_collected':
+          byId[id].collectedAmount = Number(val)
+          break
+        case '_deadline':
+          byId[id].deadline = Number(val)
+          break
+        case '_category':
+          byId[id].category = String(val)
+          break
+        case '_active':
+          byId[id].active = Number(val)
+          break
+        case '_desc':
+        case '_description':
+          byId[id].description = String(val)
+          break
+        default:
+          // Unrecognized suffix: ignore
+          break
       }
     }
 
+    const projects: any[] = []
+    for (let i = 0; i < projectCount; i++) {
+      const p = byId[i]
+      if (!p) continue
+      if (!p.name || typeof p.targetAmount !== 'number') continue
+
+      projects.push({
+        id: i,
+        name: p.name,
+        description: p.description || 'No description available',
+        creator: p.creator || '',
+        targetAmount: p.targetAmount,
+        deadline: p.deadline || Math.floor(Date.now() / 1000) + 86400 * 30,
+        collectedAmount: p.collectedAmount || 0,
+        category: p.category || 'General',
+        threshold: 0, // not stored in simple contract
+        active: (typeof p.active === 'number' ? p.active === 1 : !!p.active)
+      })
+    }
+
+    console.log('✅ Parsed projects:', projects)
     return projects
   } catch (error) {
     console.error('Error fetching projects:', error)
@@ -292,15 +449,13 @@ export const withdrawFunds = async (
 ): Promise<string> => {
   const params = await client.getTransactionParams().do()
 
-  const appArgs = [
-    new Uint8Array(Buffer.from('withdraw')),
-    algosdk.encodeUint64(projectId)
-  ]
+  const appArgs = [enc.encode('withdraw'), algosdk.encodeUint64(projectId)]
 
-  const txn = algosdk.makeApplicationNoOpTxnFromObject({
-    from: sender,
+  const txn = algosdk.makeApplicationCallTxnFromObject({
+    sender: sender,
     appIndex: appId,
     appArgs,
+    onComplete: algosdk.OnApplicationComplete.NoOpOC,
     suggestedParams: params
   })
 
@@ -320,15 +475,13 @@ export const claimRefund = async (
 ): Promise<string> => {
   const params = await client.getTransactionParams().do()
 
-  const appArgs = [
-    new Uint8Array(Buffer.from('refund')),
-    algosdk.encodeUint64(projectId)
-  ]
+  const appArgs = [enc.encode('refund'), algosdk.encodeUint64(projectId)]
 
-  const txn = algosdk.makeApplicationNoOpTxnFromObject({
-    from: sender,
+  const txn = algosdk.makeApplicationCallTxnFromObject({
+    sender: sender,
     appIndex: appId,
     appArgs,
+    onComplete: algosdk.OnApplicationComplete.NoOpOC,
     suggestedParams: params
   })
 
@@ -348,23 +501,21 @@ export const mintRewardNFT = async (
 ): Promise<string> => {
   const params = await client.getTransactionParams().do()
 
-  const appArgs = [
-    new Uint8Array(Buffer.from('mint_nft')),
-    algosdk.encodeUint64(projectId)
-  ]
+  const appArgs = [enc.encode('mint_nft'), algosdk.encodeUint64(projectId)]
 
-  const txn = algosdk.makeApplicationNoOpTxn(
-    sender,
-    params,
-    appId,
-    appArgs
-  )
+  const txn = algosdk.makeApplicationCallTxnFromObject({
+    sender: sender,
+    appIndex: appId,
+    appArgs,
+    onComplete: algosdk.OnApplicationComplete.NoOpOC,
+    suggestedParams: params
+  })
 
-  const signedTxn = txn.signTxn(privateKey)
-  const txId = await client.sendRawTransaction(signedTxn).do()
+  const signed = algosdk.signTransaction(txn, privateKey)
+  const res = await client.sendRawTransaction(signed.blob).do()
 
-  await waitForConfirmation(client, txId.txId)
-  return txId.txId
+  await waitForConfirmation(client, res.txid)
+  return res.txid
 }
 
 export const optInToApp = async (
@@ -376,7 +527,7 @@ export const optInToApp = async (
   const params = await client.getTransactionParams().do()
 
   const txn = algosdk.makeApplicationOptInTxnFromObject({
-    from: sender,
+    sender: sender,
     appIndex: appId,
     suggestedParams: params
   })
