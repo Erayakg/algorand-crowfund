@@ -113,8 +113,9 @@ export const ProjectList = () => {
     ? projects
     : projects.filter(p => p.category === selectedCategory)
 
-  const formatAlgoAmount = (microAlgos: number): string => {
-    return (microAlgos / 1000000).toFixed(2)
+  const formatAlgoAmount = (microAlgos: number | bigint): string => {
+    const amount = typeof microAlgos === 'bigint' ? Number(microAlgos) : microAlgos
+    return (amount / 1000000).toFixed(2)
   }
 
   const formatTimestamp = (timestamp: number): string => {

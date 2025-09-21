@@ -514,6 +514,9 @@ export const getProjects = async (client: algosdk.Algodv2, appId: number) => {
       const activeKey = `p_${projectIdBuffer.toString()}_active`
 
       console.log(`  Looking for keys with binary ID: project ${i} -> buffer pattern`)
+      console.log(`  🔍 Expected name key: "${nameKey}"`)
+      console.log(`  🔍 Expected desc key: "${descKey}"`)
+      console.log(`  🔍 Expected target key: "${targetKey}"`)
 
       // Extract data from global state - match binary keys
       const nameState = globalState.find((item: any) =>
@@ -541,19 +544,19 @@ export const getProjects = async (client: algosdk.Algodv2, appId: number) => {
         Buffer.from(item.key, 'base64').toString() === activeKey
       )
 
-      // Only add project if we have essential data
-      if (nameState && descState && targetState) {
+      // Only add project if we have essential data (name and target are minimum)
+      if (nameState && targetState) {
         const project = {
           id: i,
           name: nameState.value.bytes ? Buffer.from(nameState.value.bytes, 'base64').toString() : `Project ${i}`,
-          description: descState.value.bytes ? Buffer.from(descState.value.bytes, 'base64').toString() : `Description for project ${i}`,
+          description: descState?.value.bytes ? Buffer.from(descState.value.bytes, 'base64').toString() : `Description for project ${i}`,
           creator: creatorState?.value.bytes ? Buffer.from(creatorState.value.bytes, 'base64').toString() : 'Unknown Creator',
-          targetAmount: targetState.value.uint || 1000000000,
-          deadline: deadlineState?.value.uint || Math.floor(Date.now() / 1000) + 86400 * 30,
-          collectedAmount: collectedState?.value.uint || 0,
+          targetAmount: Number(targetState.value.uint || BigInt(1000000000)),
+          deadline: Number(deadlineState?.value.uint || BigInt(Math.floor(Date.now() / 1000) + 86400 * 30)),
+          collectedAmount: Number(collectedState?.value.uint || BigInt(0)),
           category: categoryState?.value.bytes ? Buffer.from(categoryState.value.bytes, 'base64').toString() : 'General',
           threshold: 0, // This contract doesn't use threshold
-          active: activeState?.value.uint === 1
+          active: activeState?.value.uint === BigInt(1)
         }
 
         console.log(`  ✅ Project ${i} parsed:`, project)
